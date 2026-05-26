@@ -1,0 +1,10 @@
+.pi
+.pi-lens
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+photo-reminder-state.json

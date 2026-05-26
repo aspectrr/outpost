@@ -1,0 +1,35 @@
+# fly.toml — Photo Reminder scheduled app
+# Deploys as a Fly.io Machine that runs on a schedule.
+#
+# Setup:
+#   1. fly apps create photo-reminder
+#   2. fly secrets set TIMETREE_EMAIL=... TIMETREE_PASSWORD=... CALENDAR_ID=... NTFY_TOPIC=...
+#   3. fly deploy
+#   4. fly machines schedule <machine-id> "*/15 * * * *"
+
+app = "photo-reminder"
+primary_region = "sjc"
+
+[build]
+dockerfile = "Dockerfile"
+
+[deploy]
+strategy = "immediate"
+
+# The Machine auto-destroys after main.py exits (exit code 0).
+# Fly restarts it per the cron schedule set via `fly machines schedule`.
+[vm]
+memory = "256mb"
+cpu_type = "shared"
+
+[env]
+LOCAL_TZ_OFFSET_HOURS = "-5"
+REMINDER_INTERVAL_MIN = "30"
+LOOKAHEAD_HOURS = "12"
+STATE_FILE = "/data/photo-reminder-state.json"
+LOG_LEVEL = "INFO"
+
+# Persistent volume for state file (survives restarts)
+[mounts]
+source = "photo_reminder_data"
+destination = "/data"
