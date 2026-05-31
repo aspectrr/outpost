@@ -3,7 +3,7 @@
 #
 # Setup:
 #   1. fly apps create photo-reminder
-#   2. fly secrets set TIMETREE_EMAIL=... TIMETREE_PASSWORD=... CALENDAR_ID=... NTFY_TOPIC=...
+#   2. fly secrets set TIMETREE_EMAIL=... TIMETREE_PASSWORD=... CALENDAR_ID=... BARK_KEY=...
 #   3. fly deploy
 #   4. fly machines schedule <machine-id> "*/15 * * * *"
 

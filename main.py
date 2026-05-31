@@ -2,7 +2,7 @@
 TimeTree Photo Reminder
 ~~~~~~~~~~~~~~~~~~~~~~~
 Polls TimeTree for events matching a specific label, then sends
-push notifications via ntfy.sh during those events to remind
+push notifications via Bark during those events to remind
 you and your partner to take photos.
 
 Designed to run as a scheduled process on Fly.io (or any cron host).
@@ -35,11 +35,10 @@ CALENDAR_ID = int(os.environ["CALENDAR_ID"])
 TARGET_LABEL_IDS = [
     int(x) for x in os.environ.get("TARGET_LABEL_IDS", "1").split(",") if x.strip()
 ]
-NTFY_TOPIC = os.environ["NTFY_TOPIC"]
-NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
-NTFY_CLICK_URL = os.environ.get(
-    "NTFY_CLICK_URL", "shortcuts://run-shortcut?name=TakePhoto"
-)
+BARK_SERVER = os.environ.get("BARK_SERVER", "https://api.day.app")
+BARK_KEYS = [k.strip() for k in os.environ["BARK_KEY"].split(",") if k.strip()]
+BARK_GROUP = os.environ.get("BARK_GROUP", "Photo Reminder")
+BARK_URL = os.environ.get("BARK_URL", "shortcuts://run-shortcut?name=TakePhoto")
 # How often (minutes) to send a repeat reminder during a single event
 REMINDER_INTERVAL_MIN = int(os.environ.get("REMINDER_INTERVAL_MIN", "30"))
 # How far ahead (hours) to look for events
@@ -91,35 +90,37 @@ def prune_old_state(state: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in state.items() if v > cutoff}
 
 
-# ── ntfy notification ─────────────────────────────────────────────────
+# ── Bark notification ──────────────────────────────────────────────────
 
 
 def send_notification(event_title: str, start_str: str, end_str: str) -> bool:
-    """Send a push notification via ntfy.sh. Returns True on success."""
+    """Send a push notification via Bark. Returns True on success."""
     body = (
-        f"📸 Time to take photos!\n\n"
         f'"{event_title}" is happening right now.\n'
         f"{start_str} → {end_str}\n\n"
         f"Open your camera and capture the moment! 🎉"
     )
-    try:
-        resp = requests.post(
-            f"{NTFY_SERVER}/{NTFY_TOPIC}",
-            data=body.encode("utf-8"),
-            headers={
-                "Title": "Photo Reminder",
-                "Priority": "high",
-                "Tags": "camera,sparkles",
-                "Click": NTFY_CLICK_URL,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        log.info("Notification sent for: %s", event_title)
-        return True
-    except requests.RequestException as e:
-        log.error("Failed to send notification: %s", e)
-        return False
+    success = True
+    for key in BARK_KEYS:
+        try:
+            resp = requests.post(
+                f"{BARK_SERVER}/{key}",
+                json={
+                    "title": "📸 Photo Reminder",
+                    "body": body,
+                    "group": BARK_GROUP,
+                    "url": BARK_URL,
+                    "sound": "alarm",
+                    "level": "timeSensitive",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            log.info("Notification sent for: %s (key ...%s)", event_title, key[-6:])
+        except requests.RequestException as e:
+            log.error("Failed to send to key ...%s: %s", key[-6:], e)
+            success = False
+    return success
 
 
 # ── Time helpers ──────────────────────────────────────────────────────
