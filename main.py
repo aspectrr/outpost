@@ -5,7 +5,7 @@ Polls TimeTree for events matching a specific label, then sends
 push notifications via Bark during those events to remind
 you and your partner to take photos.
 
-Designed to run as a scheduled process on Fly.io (or any cron host).
+Runs as a long-lived process on Fly.io, polling every N minutes.
 """
 
 from __future__ import annotations
@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -28,7 +30,6 @@ except ImportError:
     pass
 
 # ── Config ────────────────────────────────────────────────────────────
-# All config comes from env vars. See .env.example for descriptions.
 TIMETREE_EMAIL = os.environ["TIMETREE_EMAIL"]
 TIMETREE_PASSWORD = os.environ["TIMETREE_PASSWORD"]
 CALENDAR_ID = int(os.environ["CALENDAR_ID"])
@@ -39,13 +40,10 @@ BARK_SERVER = os.environ.get("BARK_SERVER", "https://api.day.app")
 BARK_KEYS = [k.strip() for k in os.environ["BARK_KEY"].split(",") if k.strip()]
 BARK_GROUP = os.environ.get("BARK_GROUP", "Photo Reminder")
 BARK_URL = os.environ.get("BARK_URL", "shortcuts://run-shortcut?name=TakePhoto")
-# How often (minutes) to send a repeat reminder during a single event
-REMINDER_INTERVAL_MIN = int(os.environ.get("REMINDER_INTERVAL_MIN", "30"))
-# How far ahead (hours) to look for events
+REMINDER_INTERVAL_MIN = int(os.environ.get("REMINDER_INTERVAL_MIN", "45"))
 LOOKAHEAD_HOURS = int(os.environ.get("LOOKAHEAD_HOURS", "12"))
-# State file to track which reminders have already been sent
+POLL_INTERVAL_MIN = int(os.environ.get("POLL_INTERVAL_MIN", "15"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "/tmp/photo-reminder-state.json"))
-# Timezone offset for your local time (e.g. "-5" for EST, "+1" for CET)
 LOCAL_TZ_OFFSET_HOURS = int(os.environ.get("LOCAL_TZ_OFFSET_HOURS", "0"))
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -57,17 +55,28 @@ logging.basicConfig(
 )
 log = logging.getLogger("photo-reminder")
 
-# ── TimeTree client (vendored at ./timetree/) ─────────────────────────
+# ── TimeTree client ──────────────────────────────────────────────────
 from timetree import TimeTreeClient  # noqa: E402
+
+# ── Graceful shutdown ─────────────────────────────────────────────────
+_shutdown = False
+
+
+def _handle_signal(signum: int, _frame: object) -> None:
+    global _shutdown
+    sig_name = signal.Signals(signum).name
+    log.info("Received %s, shutting down after this cycle...", sig_name)
+    _shutdown = True
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
 
 
 # ── State management ──────────────────────────────────────────────────
-# Track sent notifications as {"event_id:slot": timestamp}
-# A "slot" is the reminder interval bucket, e.g. "0" for first 30 min, "1" for next 30, etc.
 
 
 def load_state() -> dict[str, str]:
-    """Load notification state from disk."""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -77,7 +86,6 @@ def load_state() -> dict[str, str]:
 
 
 def save_state(state: dict[str, str]) -> None:
-    """Persist notification state to disk."""
     try:
         STATE_FILE.write_text(json.dumps(state, indent=2))
     except OSError as e:
@@ -85,7 +93,6 @@ def save_state(state: dict[str, str]) -> None:
 
 
 def prune_old_state(state: dict[str, str]) -> dict[str, str]:
-    """Remove entries older than 48 hours to keep state file small."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
     return {k: v for k, v in state.items() if v > cutoff}
 
@@ -94,7 +101,6 @@ def prune_old_state(state: dict[str, str]) -> dict[str, str]:
 
 
 def send_notification(event_title: str, start_str: str, end_str: str) -> bool:
-    """Send a push notification via Bark. Returns True on success."""
     body = (
         f'"{event_title}" is happening right now.\n'
         f"{start_str} → {end_str}\n\n"
@@ -127,12 +133,10 @@ def send_notification(event_title: str, start_str: str, end_str: str) -> bool:
 
 
 def make_local_tz() -> timezone:
-    """Create a fixed-offset timezone from LOCAL_TZ_OFFSET_HOURS."""
     return timezone(timedelta(hours=LOCAL_TZ_OFFSET_HOURS))
 
 
 def format_time(dt: datetime | None) -> str:
-    """Format a datetime for display in notifications."""
     if dt is None:
         return "???"
     local = dt.astimezone(make_local_tz())
@@ -147,7 +151,6 @@ def format_time(dt: datetime | None) -> str:
 
 
 def get_current_events() -> list:
-    """Fetch events from TimeTree, return those matching target labels."""
     client = TimeTreeClient()
     log.info("Logging in to TimeTree as %s", TIMETREE_EMAIL)
     client.signin(TIMETREE_EMAIL, TIMETREE_PASSWORD)
@@ -156,25 +159,19 @@ def get_current_events() -> list:
     events = client.get_events_sync(CALENDAR_ID)
     log.info("Fetched %d total events", len(events))
 
-    # Filter to target labels only
     matching = [e for e in events if e.label_id in TARGET_LABEL_IDS]
-    log.info(
-        "Events matching label IDs %s: %d",
-        TARGET_LABEL_IDS,
-        len(matching),
-    )
+    log.info("Events matching label IDs %s: %d", TARGET_LABEL_IDS, len(matching))
     return matching
 
 
-def process_events(events: list) -> None:
-    """Check which events are happening now and send notifications."""
+def process_events(events: list) -> int:
+    """Check which events are happening now and send notifications. Returns count sent."""
     now = datetime.now(timezone.utc)
     state = prune_old_state(load_state())
     notified = 0
 
     for event in events:
         if event.all_day:
-            # For all-day events, use the whole day
             start = (
                 event.start_at.replace(hour=0, minute=0, second=0)
                 if event.start_at
@@ -192,17 +189,13 @@ def process_events(events: list) -> None:
         if start is None or end is None:
             continue
 
-        # Skip events that are too far in the future
         if start > now + timedelta(hours=LOOKAHEAD_HOURS):
             continue
 
-        # Skip events that already ended
         if end < now:
             continue
 
-        # Is this event happening right now?
         if start <= now <= end:
-            # Calculate which reminder "slot" we're in
             minutes_in = (now - start).total_seconds() / 60
             slot = int(minutes_in // REMINDER_INTERVAL_MIN)
             state_key = f"{event.id}:{slot}"
@@ -214,11 +207,7 @@ def process_events(events: list) -> None:
                     slot,
                     minutes_in,
                 )
-                if send_notification(
-                    event.title,
-                    format_time(start),
-                    format_time(end),
-                ):
+                if send_notification(event.title, format_time(start), format_time(end)):
                     state[state_key] = now.isoformat()
                     notified += 1
             else:
@@ -230,19 +219,43 @@ def process_events(events: list) -> None:
                 )
 
     save_state(state)
-    log.info("Run complete. Sent %d new notifications.", notified)
+    return notified
+
+
+def run_check_cycle() -> None:
+    """Single check cycle: fetch events, process, notify."""
+    log.info("=== Check cycle starting ===")
+    try:
+        events = get_current_events()
+        notified = process_events(events)
+        log.info("=== Check cycle complete. Sent %d notifications. ===", notified)
+    except Exception:
+        log.exception("Error during check cycle (will retry next poll)")
 
 
 def main() -> None:
-    """Entry point — run one check cycle."""
-    log.info("=== Photo Reminder check starting ===")
-    try:
-        events = get_current_events()
-        process_events(events)
-    except Exception:
-        log.exception("Fatal error during check cycle")
-        sys.exit(1)
-    log.info("=== Photo Reminder check complete ===")
+    """Entry point — run polling loop forever."""
+    log.info(
+        "📸 Photo Reminder starting (polling every %d min, reminders every %d min)",
+        POLL_INTERVAL_MIN,
+        REMINDER_INTERVAL_MIN,
+    )
+
+    while not _shutdown:
+        run_check_cycle()
+
+        if _shutdown:
+            break
+
+        # Sleep in small chunks so we can respond to signals quickly
+        sleep_secs = POLL_INTERVAL_MIN * 60
+        log.info("Next check in %d minutes...", POLL_INTERVAL_MIN)
+        for _ in range(sleep_secs):
+            if _shutdown:
+                break
+            time.sleep(1)
+
+    log.info("📸 Photo Reminder shut down cleanly.")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-# fly.toml — Photo Reminder scheduled app
-# Deploys as a Fly.io Machine that runs on a schedule.
+# fly.toml — Photo Reminder long-running app
+# Deploys as a Fly.io Machine that runs continuously, polling every 15 min.
 #
 # Setup:
 #   1. fly apps create photo-reminder
 #   2. fly secrets set TIMETREE_EMAIL=... TIMETREE_PASSWORD=... CALENDAR_ID=... BARK_KEY=...
 #   3. fly deploy
-#   4. fly machines schedule <machine-id> "*/15 * * * *"
+#   4. No cron schedule needed — the process polls internally.
 
 app = "photo-reminder"
 primary_region = "sjc"
@@ -16,15 +16,16 @@ dockerfile = "Dockerfile"
 [deploy]
 strategy = "immediate"
 
-# The Machine auto-destroys after main.py exits (exit code 0).
-# Fly restarts it per the cron schedule set via `fly machines schedule`.
+# The process runs continuously with internal polling.
+# Fly auto-restarts if it ever crashes.
 [vm]
 memory = "256mb"
 cpu_type = "shared"
 
 [env]
 LOCAL_TZ_OFFSET_HOURS = "-5"
-REMINDER_INTERVAL_MIN = "30"
+REMINDER_INTERVAL_MIN = "45"
+POLL_INTERVAL_MIN = "15"
 LOOKAHEAD_HOURS = "12"
 STATE_FILE = "/data/photo-reminder-state.json"
 LOG_LEVEL = "INFO"

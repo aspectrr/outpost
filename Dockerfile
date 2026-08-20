@@ -9,5 +9,5 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 
-# Run the check once, then exit. Fly.io Machines restart it on schedule.
+# Long-running process — polls TimeTree every 15 minutes.
 CMD ["uv", "run", "python", "main.py"]
