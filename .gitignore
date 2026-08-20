@@ -8,4 +8,8 @@ __pycache__/
 dist/
 build/
 photo-reminder-state.json
-.ruff-cache
+.ruff_cache
+
+# Pix Agent
+.pi/
+.pi-lens/
